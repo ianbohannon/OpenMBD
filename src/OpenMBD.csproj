@@ -1,0 +1,63 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- Target .NET Framework 4.8 to match the SOLIDWORKS interop assemblies. -->
+    <TargetFramework>net48</TargetFramework>
+    <AssemblyName>OpenMBD</AssemblyName>
+    <RootNamespace>OpenMBD</RootNamespace>
+    <AssemblyTitle>OpenMBD – SOLIDWORKS MBD Exporter</AssemblyTitle>
+    <Description>SOLIDWORKS Add-in that extracts PMI/MBD data and exports it to QIF 3.0, STEP AP242, and 3D PDF.</Description>
+    <Company>OpenMBD Contributors</Company>
+    <Copyright>Copyright © OpenMBD Contributors</Copyright>
+    <Version>1.0.0</Version>
+    <OutputType>Library</OutputType>
+    <!-- Required for COM registration / ISwAddin -->
+    <RegisterForComInterop>true</RegisterForComInterop>
+    <GenerateAssemblyInfo>true</GenerateAssemblyInfo>
+    <Nullable>disable</Nullable>
+    <LangVersion>8.0</LangVersion>
+
+    <!--
+      SOLIDWORKS interop DLLs are NOT redistributable. They must be obtained from
+      a local SOLIDWORKS installation (typically at
+      C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\api\redist\).
+      Set the SW_INTEROP_DIR environment variable (or edit the HintPath values
+      below) to point to that directory before building.
+    -->
+    <SwInteropDir Condition="'$(SW_INTEROP_DIR)' != ''">$(SW_INTEROP_DIR)</SwInteropDir>
+    <SwInteropDir Condition="'$(SwInteropDir)' == ''">C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\api\redist</SwInteropDir>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <!-- SOLIDWORKS interop assemblies (must be present locally) -->
+    <Reference Include="SolidWorks.Interop.sldworks">
+      <HintPath>$(SwInteropDir)\SolidWorks.Interop.sldworks.dll</HintPath>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SolidWorks.Interop.swpublished">
+      <HintPath>$(SwInteropDir)\SolidWorks.Interop.swpublished.dll</HintPath>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+      <Private>false</Private>
+    </Reference>
+    <Reference Include="SolidWorks.Interop.swconst">
+      <HintPath>$(SwInteropDir)\SolidWorks.Interop.swconst.dll</HintPath>
+      <EmbedInteropTypes>false</EmbedInteropTypes>
+      <Private>false</Private>
+    </Reference>
+  </ItemGroup>
+
+  <ItemGroup>
+    <!-- Standard .NET references -->
+    <Reference Include="System.Windows.Forms" />
+    <Reference Include="System.Drawing" />
+    <Reference Include="System.Xml" />
+  </ItemGroup>
+
+  <!-- Optional: embed toolbar icon bitmaps as resources -->
+  <ItemGroup>
+    <EmbeddedResource Include="Resources\toolbar.png"     Condition="Exists('Resources\toolbar.png')" />
+    <EmbeddedResource Include="Resources\toolbarMask.png" Condition="Exists('Resources\toolbarMask.png')" />
+  </ItemGroup>
+
+</Project>
