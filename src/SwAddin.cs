@@ -13,9 +13,18 @@ namespace OpenMBD
     /// in-process server so that SOLIDWORKS can load it at startup.  Three toolbar
     /// buttons are added to a custom CommandManager group:
     /// <list type="bullet">
-    ///   <item><description>Export QIF – exports semantic MBD data to a QIF 3.0 XML file</description></item>
-    ///   <item><description>Export STEP 242 – invokes SOLIDWORKS' native STEP AP242 export</description></item>
-    ///   <item><description>Export 3D PDF – invokes SOLIDWORKS' native 3D PDF export</description></item>
+    ///   <item><description>Export QIF – exports semantic MBD data to a QIF 3.0 XML file.</description></item>
+    ///   <item><description>
+    ///     Export STEP 242 – exports to STEP AP242 using <see cref="Step242Exporter"/>.
+    ///     Geometry is exported via the standard SOLIDWORKS STEP exporter (AP203/AP214, available
+    ///     in every license) and PMI annotations are appended as ISO 10303-242 GD&amp;T entities.
+    ///     No paid SOLIDWORKS MBD add-on is required.
+    ///   </description></item>
+    ///   <item><description>
+    ///     Export PDF – generates a formatted MBD/PMI report PDF using <see cref="PdfReportExporter"/>.
+    ///     The report contains a full annotation table and is created with built-in .NET libraries only.
+    ///     No paid SOLIDWORKS 3D PDF add-on is required.
+    ///   </description></item>
     /// </list>
     /// </para>
     /// </summary>
@@ -163,9 +172,9 @@ namespace OpenMBD
                 nameof(OnExportStep242), nameof(CanExportStep242),
                 CmdIdExportStep, menuToolbarOpts);
 
-            cmdGroup.AddCommandItem2("Export 3D PDF", -1,
-                "Export the model to a 3D PDF file",
-                "Export 3D PDF", 2,
+            cmdGroup.AddCommandItem2("Export PDF", -1,
+                "Export MBD/PMI data to a PDF report (no 3D PDF add-on required)",
+                "Export PDF", 2,
                 nameof(OnExport3DPdf), nameof(CanExport3DPdf),
                 CmdIdExport3DPdf, menuToolbarOpts);
 
@@ -265,13 +274,23 @@ namespace OpenMBD
             }
         }
 
-        /// <summary>Invoked when the user clicks 'Export STEP 242'.</summary>
+        /// <summary>
+        /// Invoked when the user clicks 'Export STEP 242'.
+        /// <para>
+        /// Uses <see cref="Step242Exporter"/> to produce an AP242 file without the
+        /// paid SOLIDWORKS MBD add-on.  The geometry is captured via the standard
+        /// SOLIDWORKS STEP exporter (AP203/AP214, available in every license) and
+        /// PMI annotations are appended as ISO 10303-242 GD&amp;T entities.
+        /// </para>
+        /// </summary>
         public void OnExportStep242()
         {
             try
             {
                 var swModel = _swApp.IActiveDoc2 as ModelDoc2;
                 if (swModel == null) return;
+
+                var mbdItems = _pmiService.ExtractFromActiveDocument();
 
                 using (var dlg = new System.Windows.Forms.SaveFileDialog
                 {
@@ -284,33 +303,12 @@ namespace OpenMBD
                     if (dlg.ShowDialog() != System.Windows.Forms.DialogResult.OK)
                         return;
 
-                    // Configure the STEP export data object for AP242 (edition 2).
-                    var stepData = _swApp.GetExportFileData(
-                        (int)swExportDataFileType_e.swExportStepData) as ExportStepData;
-                    if (stepData != null)
-                    {
-                        stepData.SetIncludePMI(true);
-                        // AP242 = swStepAP_e.swStepAP242
-                        stepData.ApplicationProtocol =
-                            (int)swStepAP_e.swStepAP242;
-                    }
+                    var exporter = new Step242Exporter();
+                    exporter.Export(swModel, mbdItems, dlg.FileName);
 
-                    int errors = 0, warnings = 0;
-                    bool ok = swModel.Extension.SaveAs3(
-                        dlg.FileName,
-                        (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
-                        (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
-                        stepData,
-                        null,
-                        ref errors,
-                        ref warnings);
-
-                    string msg = ok
-                        ? $"OpenMBD: STEP AP242 export complete.\n{dlg.FileName}"
-                        : $"OpenMBD: STEP AP242 export failed (errors={errors}, warnings={warnings}).";
-
-                    _swApp.SendMsgToUser2(msg,
-                        ok ? (int)swMessageBoxIcon_e.swMbInformation : (int)swMessageBoxIcon_e.swMbStop,
+                    _swApp.SendMsgToUser2(
+                        $"OpenMBD: STEP AP242 export complete.\n{dlg.FileName}",
+                        (int)swMessageBoxIcon_e.swMbInformation,
                         (int)swMessageBoxBtn_e.swMbOk);
                 }
             }
@@ -323,17 +321,23 @@ namespace OpenMBD
             }
         }
 
-        /// <summary>Invoked when the user clicks 'Export 3D PDF'.</summary>
+        /// <summary>
+        /// Invoked when the user clicks 'Export PDF'.
+        /// <para>
+        /// Uses <see cref="PdfReportExporter"/> to generate a formatted MBD/PMI
+        /// report PDF without the paid SOLIDWORKS 3D PDF add-on.  The report
+        /// contains a full annotation table built with built-in .NET libraries only.
+        /// </para>
+        /// </summary>
         public void OnExport3DPdf()
         {
             try
             {
-                var swModel = _swApp.IActiveDoc2 as ModelDoc2;
-                if (swModel == null) return;
+                var mbdItems = _pmiService.ExtractFromActiveDocument();
 
                 using (var dlg = new System.Windows.Forms.SaveFileDialog
                 {
-                    Title      = "Export 3D PDF",
+                    Title      = "Export PDF MBD Report",
                     Filter     = "PDF Files (*.pdf)|*.pdf",
                     DefaultExt = "pdf",
                     FileName   = GetDefaultFileName("pdf")
@@ -342,37 +346,20 @@ namespace OpenMBD
                     if (dlg.ShowDialog() != System.Windows.Forms.DialogResult.OK)
                         return;
 
-                    var pdfData = _swApp.GetExportFileData(
-                        (int)swExportDataFileType_e.swExportPdfData) as ExportPdfData;
-                    if (pdfData != null)
-                    {
-                        pdfData.ExportAs3D       = true;
-                        pdfData.ViewPdfAfterSave = false;
-                    }
+                    var exporter = new PdfReportExporter();
+                    exporter.Export(mbdItems, dlg.FileName,
+                        _swApp.IActiveDoc2?.GetPathName() ?? string.Empty);
 
-                    int errors = 0, warnings = 0;
-                    bool ok = swModel.Extension.SaveAs3(
-                        dlg.FileName,
-                        (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
-                        (int)swSaveAsOptions_e.swSaveAsOptions_Silent,
-                        pdfData,
-                        null,
-                        ref errors,
-                        ref warnings);
-
-                    string msg = ok
-                        ? $"OpenMBD: 3D PDF export complete.\n{dlg.FileName}"
-                        : $"OpenMBD: 3D PDF export failed (errors={errors}, warnings={warnings}).";
-
-                    _swApp.SendMsgToUser2(msg,
-                        ok ? (int)swMessageBoxIcon_e.swMbInformation : (int)swMessageBoxIcon_e.swMbStop,
+                    _swApp.SendMsgToUser2(
+                        $"OpenMBD: PDF MBD report export complete.\n{dlg.FileName}",
+                        (int)swMessageBoxIcon_e.swMbInformation,
                         (int)swMessageBoxBtn_e.swMbOk);
                 }
             }
             catch (Exception ex)
             {
                 _swApp.SendMsgToUser2(
-                    $"OpenMBD – Export 3D PDF error:\n{ex.Message}",
+                    $"OpenMBD – Export PDF error:\n{ex.Message}",
                     (int)swMessageBoxIcon_e.swMbStop,
                     (int)swMessageBoxBtn_e.swMbOk);
             }
