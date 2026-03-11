@@ -10,20 +10,16 @@ namespace OpenMBD
     /// SOLIDWORKS Add-in entry point for the OpenMBD tool.
     /// <para>
     /// This class implements <see cref="ISwAddin"/> and registers itself as a COM
-    /// in-process server so that SOLIDWORKS can load it at startup.  Three toolbar
+    /// in-process server so that SOLIDWORKS can load it at startup.  Two toolbar
     /// buttons are added to a custom CommandManager group:
     /// <list type="bullet">
     ///   <item><description>Export QIF – exports semantic MBD data to a QIF 3.0 XML file.</description></item>
     ///   <item><description>
     ///     Export STEP 242 – exports to STEP AP242 using <see cref="Step242Exporter"/>.
     ///     Geometry is exported via the standard SOLIDWORKS STEP exporter (AP203/AP214, available
-    ///     in every license) and PMI annotations are appended as ISO 10303-242 GD&amp;T entities.
+    ///     in every license) and PMI annotations are written as proper ISO 10303-242 GD&amp;T
+    ///     entities via Open CASCADE Technology (OCCT).
     ///     No paid SOLIDWORKS MBD add-on is required.
-    ///   </description></item>
-    ///   <item><description>
-    ///     Export PDF – generates a formatted MBD/PMI report PDF using <see cref="PdfReportExporter"/>.
-    ///     The report contains a full annotation table and is created with built-in .NET libraries only.
-    ///     No paid SOLIDWORKS 3D PDF add-on is required.
     ///   </description></item>
     /// </list>
     /// </para>
@@ -38,11 +34,10 @@ namespace OpenMBD
         // ------------------------------------------------------------------ //
 
         private const string AddInName        = "OpenMBD";
-        private const string AddInDescription = "Model-Based Definition (MBD) data exporter for QIF, STEP 242, and 3D PDF";
+        private const string AddInDescription = "Model-Based Definition (MBD) data exporter for QIF and STEP AP242";
         private const int    CmdGroupId       = 201;   // must be unique across all add-ins
         private const int    CmdIdExportQif   = 0;
         private const int    CmdIdExportStep  = 1;
-        private const int    CmdIdExport3DPdf = 2;
 
         // ------------------------------------------------------------------ //
         //  Private state                                                       //
@@ -133,14 +128,14 @@ namespace OpenMBD
             // by ICommandGroup.
             _bmpHandler = new BitmapHandler();
 
-            // Tab-image toolbar strip: 20px × 20px per icon, 3 icons.
+            // Tab-image toolbar strip: 20px × 20px per icon, 2 icons.
             string toolbarPath = _bmpHandler.CreateFileFromResourceBitmap(
                 "OpenMBD.Resources.toolbar.png", GetType().Assembly);
             string toolbarMaskPath = _bmpHandler.CreateFileFromResourceBitmap(
                 "OpenMBD.Resources.toolbarMask.png", GetType().Assembly);
 
             bool docTypes = true;
-            int[] knownIds = new int[3] { CmdIdExportQif, CmdIdExportStep, CmdIdExport3DPdf };
+            int[] knownIds = new int[2] { CmdIdExportQif, CmdIdExportStep };
 
             ICommandGroup cmdGroup = _cmdMgr.CreateCommandGroup2(
                 CmdGroupId,
@@ -167,16 +162,10 @@ namespace OpenMBD
                 CmdIdExportQif, menuToolbarOpts);
 
             cmdGroup.AddCommandItem2("Export STEP 242", -1,
-                "Export the model to a STEP AP242 file",
+                "Export the model to a STEP AP242 file with PMI (via OCCT)",
                 "Export STEP 242", 1,
                 nameof(OnExportStep242), nameof(CanExportStep242),
                 CmdIdExportStep, menuToolbarOpts);
-
-            cmdGroup.AddCommandItem2("Export PDF", -1,
-                "Export MBD/PMI data to a PDF report (no 3D PDF add-on required)",
-                "Export PDF", 2,
-                nameof(OnExport3DPdf), nameof(CanExport3DPdf),
-                CmdIdExport3DPdf, menuToolbarOpts);
 
             cmdGroup.HasToolbar = true;
             cmdGroup.HasMenu    = true;
@@ -186,7 +175,7 @@ namespace OpenMBD
             AddCommandTab(swDocumentTypes_e.swDocPART,     cmdGroup);
             AddCommandTab(swDocumentTypes_e.swDocASSEMBLY, cmdGroup);
 
-            _cmdIds = new int[] { CmdIdExportQif, CmdIdExportStep, CmdIdExport3DPdf };
+            _cmdIds = new int[] { CmdIdExportQif, CmdIdExportStep };
         }
 
         private void AddCommandTab(swDocumentTypes_e docType, ICommandGroup cmdGroup)
@@ -199,12 +188,10 @@ namespace OpenMBD
             int[] cmdArr = new int[]
             {
                 cmdGroup.CommandID[CmdIdExportQif],
-                cmdGroup.CommandID[CmdIdExportStep],
-                cmdGroup.CommandID[CmdIdExport3DPdf]
+                cmdGroup.CommandID[CmdIdExportStep]
             };
             int[] txtDisplay = new int[]
             {
-                (int)swCommandTabButtonTextDisplay_e.swCommandTabButton_TextBelow,
                 (int)swCommandTabButtonTextDisplay_e.swCommandTabButton_TextBelow,
                 (int)swCommandTabButtonTextDisplay_e.swCommandTabButton_TextBelow
             };
@@ -280,7 +267,8 @@ namespace OpenMBD
         /// Uses <see cref="Step242Exporter"/> to produce an AP242 file without the
         /// paid SOLIDWORKS MBD add-on.  The geometry is captured via the standard
         /// SOLIDWORKS STEP exporter (AP203/AP214, available in every license) and
-        /// PMI annotations are appended as ISO 10303-242 GD&amp;T entities.
+        /// PMI annotations are written as proper ISO 10303-242 GD&amp;T entities
+        /// via Open CASCADE Technology (OCCT).
         /// </para>
         /// </summary>
         public void OnExportStep242()
@@ -321,57 +309,12 @@ namespace OpenMBD
             }
         }
 
-        /// <summary>
-        /// Invoked when the user clicks 'Export PDF'.
-        /// <para>
-        /// Uses <see cref="PdfReportExporter"/> to generate a formatted MBD/PMI
-        /// report PDF without the paid SOLIDWORKS 3D PDF add-on.  The report
-        /// contains a full annotation table built with built-in .NET libraries only.
-        /// </para>
-        /// </summary>
-        public void OnExport3DPdf()
-        {
-            try
-            {
-                var mbdItems = _pmiService.ExtractFromActiveDocument();
-
-                using (var dlg = new System.Windows.Forms.SaveFileDialog
-                {
-                    Title      = "Export PDF MBD Report",
-                    Filter     = "PDF Files (*.pdf)|*.pdf",
-                    DefaultExt = "pdf",
-                    FileName   = GetDefaultFileName("pdf")
-                })
-                {
-                    if (dlg.ShowDialog() != System.Windows.Forms.DialogResult.OK)
-                        return;
-
-                    var exporter = new PdfReportExporter();
-                    exporter.Export(mbdItems, dlg.FileName,
-                        _swApp.IActiveDoc2?.GetPathName() ?? string.Empty);
-
-                    _swApp.SendMsgToUser2(
-                        $"OpenMBD: PDF MBD report export complete.\n{dlg.FileName}",
-                        (int)swMessageBoxIcon_e.swMbInformation,
-                        (int)swMessageBoxBtn_e.swMbOk);
-                }
-            }
-            catch (Exception ex)
-            {
-                _swApp.SendMsgToUser2(
-                    $"OpenMBD – Export PDF error:\n{ex.Message}",
-                    (int)swMessageBoxIcon_e.swMbStop,
-                    (int)swMessageBoxBtn_e.swMbOk);
-            }
-        }
-
         // ------------------------------------------------------------------ //
         //  Enable/disable callbacks (return 1 = enabled)                      //
         // ------------------------------------------------------------------ //
 
         public int CanExportQif()    => HasActivePartOrAssembly() ? 1 : 0;
         public int CanExportStep242() => HasActivePartOrAssembly() ? 1 : 0;
-        public int CanExport3DPdf()  => HasActivePartOrAssembly() ? 1 : 0;
 
         // ------------------------------------------------------------------ //
         //  Utility                                                             //

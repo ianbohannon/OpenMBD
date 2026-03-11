@@ -41,15 +41,14 @@ namespace OpenMBD
                 }
                 else
                 {
-                    // Resource not found – write a 60×20 placeholder (3 icons × 20px).
-                    using (var bmp = new Bitmap(60, 20))
+                    // Resource not found – write a 40×20 placeholder (2 icons × 20px).
+                    using (var bmp = new Bitmap(40, 20))
                     using (var g = Graphics.FromImage(bmp))
                     {
                         g.Clear(Color.Transparent);
-                        // Draw simple coloured blocks for each of the 3 commands.
+                        // Draw simple coloured blocks for each of the 2 commands.
                         g.FillRectangle(Brushes.DodgerBlue,  0,  0, 18, 18);  // QIF
                         g.FillRectangle(Brushes.LimeGreen,  20,  0, 18, 18);  // STEP
-                        g.FillRectangle(Brushes.OrangeRed,  40,  0, 18, 18);  // PDF
                         bmp.Save(outputPath, System.Drawing.Imaging.ImageFormat.Png);
                     }
                 }

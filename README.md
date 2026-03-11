@@ -5,35 +5,32 @@ Model-Based Definition (MBD) / PMI data from SOLIDWORKS parts and assemblies and
 exports it to industry-standard interchange formats.
 
 > **No paid SOLIDWORKS add-ons required.**  OpenMBD works with the most basic
-> standard SOLIDWORKS license.  It does not use the SOLIDWORKS MBD, STEP AP242,
-> or 3D PDF add-ons.
+> standard SOLIDWORKS license.  It does not use the SOLIDWORKS MBD or STEP AP242
+> add-ons.
 
 | Format | Status |
 |--------|--------|
 | **QIF 3.0** (ANSI/ASME QIF 3000-2018) | ✅ Implemented (semantic XML export) |
-| **STEP AP242** (ISO 10303-242) | ✅ Implemented (free, no MBD add-on needed) |
-| **PDF MBD Report** | ✅ Implemented (free, no 3D PDF add-on needed) |
+| **STEP AP242** (ISO 10303-242) | ✅ Implemented via Open CASCADE Technology (OCCT) |
 
 ---
 
 ## Why OpenMBD?
 
-SOLIDWORKS can export STEP AP242 and 3D PDF natively, **but both features
-require paid add-ons** (SOLIDWORKS MBD for AP242, and the 3D PDF add-on for 3D
-PDF) that are not part of the base SOLIDWORKS license.
+SOLIDWORKS can export STEP AP242 natively, **but this feature requires the paid
+SOLIDWORKS MBD add-on** that is not included in the base SOLIDWORKS license.
 
-OpenMBD implements both exports without those add-ons:
+OpenMBD implements the export without that add-on using
+[Open CASCADE Technology (OCCT)](https://dev.opencascade.org/):
 
-* **STEP AP242** – geometry is exported via the standard SOLIDWORKS STEP
-  exporter (AP203/AP214, available in every SOLIDWORKS license).  The exported
-  file is then post-processed: the `FILE_SCHEMA` header is upgraded to
-  `AP242_MANAGED_MODEL_BASED_3D_ENGINEERING` and PMI annotations (extracted via
-  `IPMIData`) are appended as ISO 10303-242 GD&T entities.
-
-* **PDF MBD Report** – a formatted PDF document is generated using only
-  built-in .NET Framework libraries.  It contains a complete PMI annotation
-  table (type, characteristic, value, unit, tolerances, datum references) and
-  opens in any standard PDF viewer.  No 3D viewer is required.
+* **STEP AP242** – geometry is exported via the standard SOLIDWORKS STEP exporter
+  (AP203/AP214, available in every SOLIDWORKS license).  The exported geometry
+  is then read by OCCT's `STEPCAFControl_Reader` into an XCAF document.  PMI
+  annotations (extracted via `IPMIData`) are attached to the document using
+  `XCAFDoc_DimTolTool`, and the final AP242 Edition 2 file is written by
+  `STEPCAFControl_Writer` with `write.step.schema` set to `AP242DED`.  All PMI
+  entities are encoded as proper ISO 10303-242 / ISO 10303-47 GD&T constructs —
+  not as raw text strings or post-processed entity appends.
 
 Additionally, there is no freely available tool that bridges the SOLIDWORKS PMI
 data model to the **QIF format**.  QIF is the semantic standard used by CMMs,
@@ -53,9 +50,14 @@ OpenMBD/
 │   ├── PmiExtractionService.cs ← IPMIData extraction (Gtol, DatumTag, Dimension)
 │   ├── MBDDataModel.cs         ← Semantic data schema (value, tolerance, datums)
 │   ├── QifExporter.cs          ← QIF 3.0 XML serialisation stub
-│   ├── Step242Exporter.cs      ← STEP AP242 exporter (free, no MBD add-on)
-│   ├── PdfReportExporter.cs    ← PDF MBD report exporter (free, no 3D PDF add-on)
+│   ├── Step242Exporter.cs      ← STEP AP242 exporter (OCCT-based, no MBD add-on)
+│   ├── OcctBridge.cs           ← P/Invoke declarations for OpenMBD.OcctBridge.dll
 │   └── BitmapHandler.cs        ← Toolbar icon helper
+├── native/                     ← C++ source for the OCCT bridge DLL
+│   ├── OcctBridge.h            ← C-compatible API header
+│   ├── OcctBridge.cpp          ← OCCT implementation
+│   ├── CMakeLists.txt          ← CMake build file
+│   └── README.md               ← Build instructions for the native DLL
 ├── lib/                        ← Third-party / generated code (see lib/README.md)
 │   └── README.md               ← Instructions for generating QIF C# classes from XSD
 ├── schemas/                    ← XML schema definitions (see schemas/README.md)
@@ -70,28 +72,43 @@ OpenMBD/
 
 ### Prerequisites
 
-* Visual Studio 2019 or later (or the .NET 4.8 SDK)
-* A licensed installation of SOLIDWORKS (2021 or later recommended) — **standard
-  license; no MBD, AP242, or 3D PDF add-ons required**
-* SOLIDWORKS interop DLLs – located at:
-  ```
-  C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\api\redist\
-  ```
+| Dependency | Minimum version | Notes |
+|-----------|----------------|-------|
+| Visual Studio | 2019 | or the .NET 4.8 SDK for C# only |
+| SOLIDWORKS | 2021 | standard license; no MBD add-on |
+| SOLIDWORKS interop DLLs | — | `C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\api\redist\` |
+| CMake | 3.16 | for the native OCCT bridge |
+| C++ compiler | MSVC 2019+ | for the native OCCT bridge |
+| Open CASCADE Technology | 7.7.0 | [dev.opencascade.org](https://dev.opencascade.org/release) |
 
-### Build steps
+### 1. Build the native OCCT bridge
 
 ```powershell
-# 1. Clone the repository
-git clone https://github.com/ianbohannon/OpenMBD.git
-cd OpenMBD
+cd native
+cmake -B build -DCMAKE_BUILD_TYPE=Release `
+      -DOpenCASCADE_DIR="C:\OpenCASCADE-7.7.0\cmake"
+cmake --build build --config Release
+```
 
-# 2. Set the path to your SOLIDWORKS interop DLLs (or edit OpenMBD.csproj directly)
+See [`native/README.md`](native/README.md) for detailed installation and build
+instructions.
+
+### 2. Build the C# add-in
+
+```powershell
+# Set the path to your SOLIDWORKS interop DLLs (or edit OpenMBD.csproj directly)
 $env:SW_INTEROP_DIR = "C:\Program Files\SOLIDWORKS Corp\SOLIDWORKS\api\redist"
 
-# 3. Build
 dotnet build src/OpenMBD.csproj -c Release
+```
 
-# 4. Register the add-in (run as Administrator)
+### 3. Deploy and register
+
+```powershell
+# Copy the OCCT bridge DLL next to the add-in
+copy native\build\Release\OpenMBD.OcctBridge.dll src\bin\Release\net48\
+
+# Register the add-in (run as Administrator)
 regasm /codebase src\bin\Release\net48\OpenMBD.dll
 ```
 
@@ -104,17 +121,13 @@ After registration, restart SOLIDWORKS and enable the add-in under
 
 1. Open a Part (`.sldprt`) or Assembly (`.sldasm`) that contains PMI annotations.
 2. The **OpenMBD** tab appears in the CommandManager ribbon.
-3. Click one of the three export buttons:
+3. Click one of the two export buttons:
    - **Export QIF** – extracts all PMI annotations via `IPMIData` and writes a
      QIF 3.0 XML file.
-   - **Export STEP 242** – exports the model as a STEP AP242 file using
-     `Step242Exporter`.  Geometry is captured via the standard SOLIDWORKS STEP
-     exporter and PMI annotations are appended as AP242 GD&T entities.
-     No SOLIDWORKS MBD add-on required.
-   - **Export PDF** – generates a formatted MBD/PMI report PDF using
-     `PdfReportExporter`.  The report contains a complete annotation table
-     produced with built-in .NET libraries only.
-     No SOLIDWORKS 3D PDF add-on required.
+   - **Export STEP 242** – exports the model as a STEP AP242 Edition 2 file using
+     `Step242Exporter` backed by OCCT.  Geometry is captured via the standard
+     SOLIDWORKS STEP exporter and PMI annotations are written as proper
+     ISO 10303-242 GD&T entities.  No SOLIDWORKS MBD add-on required.
 
 ---
 
@@ -142,37 +155,30 @@ Without `IPMIData`, the only alternative is to iterate drawing annotations and
 parse text strings – producing semantically meaningless output that inspection
 software cannot act on.
 
-### STEP AP242 Export (`Step242Exporter`)
+### STEP AP242 Export (`Step242Exporter` + OCCT)
 
-`Step242Exporter.cs` uses a two-step, no-add-on approach:
+`Step242Exporter.cs` uses a two-step, no-add-on approach backed by
+[Open CASCADE Technology (OCCT)](https://dev.opencascade.org/):
 
 1. **Geometry export** – calls `model.Extension.SaveAs3(path, ..., null, null, ...)`
    with a `null` `ExportStepData` argument.  This invokes SOLIDWORKS' default
    STEP exporter (AP203/AP214), which is available in every SOLIDWORKS license.
 
-2. **Post-processing** – reads the exported file and:
-   * Replaces the `FILE_SCHEMA` declaration with
-     `AP242_MANAGED_MODEL_BASED_3D_ENGINEERING{}{}`.
-   * Locates the `PRODUCT_DEFINITION_SHAPE` entity and creates a
-     `SHAPE_ASPECT` anchor.
-   * Appends ISO 10303-47 / 10303-242 GD&T entities for every extracted PMI
-     annotation (e.g. `FLATNESS_TOLERANCE`, `DATUM_FEATURE`,
-     `DIMENSIONAL_SIZE`, `PLUS_MINUS_TOLERANCE`).
-   * Injects all new entities immediately before the final `ENDSEC;`.
+2. **OCCT authoring** – the native bridge `OpenMBD.OcctBridge.dll` (built from
+   `native/OcctBridge.cpp`):
+   * Reads the temporary STEP geometry file into an OCCT XCAF document via
+     `STEPCAFControl_Reader`.
+   * Attaches PMI annotations to the document using `XCAFDoc_DimTolTool` and
+     the `XCAFDimTolObjects_*` family of objects:
+     * `XCAFDimTolObjects_GeomToleranceObject` for geometric tolerances.
+     * `XCAFDimTolObjects_DatumObject` for datum feature symbols.
+     * `XCAFDimTolObjects_DimensionObject` for linear dimensions.
+   * Writes the final STEP AP242 Edition 2 file via `STEPCAFControl_Writer`
+     with `Interface_Static::SetCVal("write.step.schema", "AP242DED")`.
 
-### PDF MBD Report (`PdfReportExporter`)
-
-`PdfReportExporter.cs` generates a PDF 1.4 document using only built-in .NET
-Framework libraries (`System.IO`, `System.Text`).  The embedded `MiniPdfDocument`
-class writes a valid PDF byte stream with a correct cross-reference table.
-
-The report includes:
-* A title block with model name, generation date, and annotation counts.
-* A paginated PMI annotation table (ID, type, characteristic, value, unit,
-  tolerances, datum references).
-
-The fonts used are Helvetica and Helvetica-Bold – standard Type 1 PDF fonts
-that require no embedding and render correctly in every PDF viewer.
+The result is a fully conformant STEP AP242 file with PMI encoded as native
+ISO 10303-242 / ISO 10303-47 GD&T entities — not as raw text appended outside
+the schema.
 
 ### QIF Integration
 
