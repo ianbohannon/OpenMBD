@@ -6,7 +6,7 @@
     <AssemblyName>OpenMBD</AssemblyName>
     <RootNamespace>OpenMBD</RootNamespace>
     <AssemblyTitle>OpenMBD – SOLIDWORKS MBD Exporter</AssemblyTitle>
-    <Description>SOLIDWORKS Add-in that extracts PMI/MBD data and exports it to QIF 3.0, STEP AP242, and 3D PDF.</Description>
+    <Description>SOLIDWORKS Add-in that extracts PMI/MBD data and exports it to QIF 3.0 and STEP AP242 (via Open CASCADE Technology).</Description>
     <Company>OpenMBD Contributors</Company>
     <Copyright>Copyright © OpenMBD Contributors</Copyright>
     <Version>1.0.0</Version>

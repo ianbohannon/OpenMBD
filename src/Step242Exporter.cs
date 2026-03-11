@@ -1,61 +1,54 @@
 using System;
 using System.Collections.Generic;
-using System.Globalization;
 using System.IO;
 using System.Text;
-using System.Text.RegularExpressions;
 using SolidWorks.Interop.sldworks;
 using SolidWorks.Interop.swconst;
 
 namespace OpenMBD
 {
     /// <summary>
-    /// Generates STEP AP242 files without requiring the paid SOLIDWORKS MBD add-on.
+    /// Exports a SOLIDWORKS model to a STEP AP242 file with embedded PMI
+    /// annotations using Open CASCADE Technology (OCCT).
     /// <para>
-    /// The approach has two steps:
+    /// The export uses a two-step pipeline:
     /// <list type="number">
     ///   <item><description>
-    ///     Geometry is exported via the standard SOLIDWORKS STEP exporter (AP203 / AP214),
-    ///     which is available in every SOLIDWORKS license at no extra cost.
+    ///     <b>Geometry export</b> – the model is saved to a temporary STEP
+    ///     AP203/AP214 file via the standard SOLIDWORKS STEP exporter
+    ///     (available in every license; no MBD add-on required).
     ///   </description></item>
     ///   <item><description>
-    ///     The exported file is post-processed: the <c>FILE_SCHEMA</c> header is upgraded
-    ///     to <c>AP242_MANAGED_MODEL_BASED_3D_ENGINEERING</c> and PMI annotations
-    ///     (extracted by <see cref="PmiExtractionService"/>) are appended as ISO 10303-242
-    ///     GD&amp;T entities before the final <c>ENDSEC;</c>.
+    ///     <b>OCCT authoring</b> – <c>OpenMBD.OcctBridge.dll</c> reads the
+    ///     temporary geometry file into an XCAF document, attaches the PMI
+    ///     annotations (geometric tolerances, datum features, linear
+    ///     dimensions) as proper ISO 10303-242 / ISO 10303-47 GD&amp;T
+    ///     entities, and writes the final STEP AP242 Edition 2 file.
     ///   </description></item>
     /// </list>
+    /// </para>
+    /// <para>
+    /// The native bridge DLL (<c>OpenMBD.OcctBridge.dll</c>) must be present
+    /// in the same directory as <c>OpenMBD.dll</c> at runtime.  Build
+    /// instructions are in <c>/native/README.md</c>.
     /// </para>
     /// </summary>
     internal sealed class Step242Exporter
     {
-        /// <summary>FILE_SCHEMA identifier for STEP AP242 Edition 2.
-        /// The <c>{}{}</c> suffix is part of the ISO 10303-1 EXPRESS schema naming
-        /// convention; the two sets of empty braces denote the (empty) configuration
-        /// parameter list and the (empty) version parameter list for the schema.</summary>
-        private const string Ap242Schema =
-            "AP242_MANAGED_MODEL_BASED_3D_ENGINEERING{}{}";
-
-        /// <summary>
-        /// Minimum entity ID used as the starting point when scanning the STEP file
-        /// for the highest existing entity number.  Set high enough to ensure that
-        /// injected PMI entity IDs do not collide with any entity in a typical
-        /// SOLIDWORKS-exported AP203/AP214 file.
-        /// </summary>
-        private const int MinStartEntityId = 1000;
-
         // ------------------------------------------------------------------ //
         //  Public API                                                          //
         // ------------------------------------------------------------------ //
 
         /// <summary>
-        /// Exports the given SOLIDWORKS model to a STEP AP242 file.
+        /// Exports the given SOLIDWORKS model to a STEP AP242 file with PMI.
         /// </summary>
         /// <param name="model">The active SOLIDWORKS model document.</param>
         /// <param name="mbdItems">PMI annotations to embed as AP242 GD&amp;T entities.</param>
         /// <param name="outputPath">Destination path for the generated .step / .stp file.</param>
         /// <exception cref="ArgumentNullException">When <paramref name="model"/> is null.</exception>
-        /// <exception cref="InvalidOperationException">When the geometry export fails.</exception>
+        /// <exception cref="InvalidOperationException">
+        ///   When the geometry export or the OCCT write step fails.
+        /// </exception>
         public void Export(ModelDoc2 model, List<MBDDataModel> mbdItems, string outputPath)
         {
             if (model == null)
@@ -66,7 +59,7 @@ namespace OpenMBD
             try
             {
                 ExportGeometry(model, tempStep);
-                PostProcess(tempStep, mbdItems ?? new List<MBDDataModel>(), outputPath);
+                WriteWithOcct(tempStep, mbdItems ?? new List<MBDDataModel>(), outputPath);
             }
             finally
             {
@@ -83,9 +76,9 @@ namespace OpenMBD
         {
             int errors = 0, warnings = 0;
 
-            // Passing null for the ExportStepData argument tells SOLIDWORKS to use
-            // its default STEP exporter (AP203 / AP214).  This path is available in
-            // every SOLIDWORKS license — no MBD add-on is required.
+            // Passing null for the ExportStepData argument invokes SOLIDWORKS'
+            // default STEP exporter (AP203/AP214), which is available in every
+            // SOLIDWORKS license — no MBD add-on is required.
             bool ok = model.Extension.SaveAs3(
                 tempPath,
                 (int)swSaveAsVersion_e.swSaveAsCurrentVersion,
@@ -99,208 +92,114 @@ namespace OpenMBD
         }
 
         // ------------------------------------------------------------------ //
-        //  Step 2 – upgrade schema to AP242 and inject PMI entities           //
+        //  Step 2 – load into OCCT, attach PMI, write AP242                   //
         // ------------------------------------------------------------------ //
 
-        private static void PostProcess(
-            string sourcePath, List<MBDDataModel> items, string outputPath)
+        private static void WriteWithOcct(
+            string tempStepPath, List<MBDDataModel> items, string outputPath)
         {
-            string text = File.ReadAllText(sourcePath, Encoding.ASCII);
+            IntPtr ctx = OcctBridge.OcctCreateContext();
+            if (ctx == IntPtr.Zero)
+                throw new InvalidOperationException(
+                    "OCCT context allocation failed.  Ensure OpenMBD.OcctBridge.dll " +
+                    "is present in the add-in directory.");
 
-            // 2a. Replace the FILE_SCHEMA declaration with the AP242 identifier.
-            text = Regex.Replace(
-                text,
-                @"FILE_SCHEMA\s*\(\s*\(.*?\)\s*\)\s*;",
-                $"FILE_SCHEMA (('{Ap242Schema}'));",
-                RegexOptions.IgnoreCase | RegexOptions.Singleline);
-
-            // 2b. Locate the PRODUCT_DEFINITION_SHAPE entity so that our PMI
-            //     annotations can reference it as their shape anchor.
-            int pdsId  = FindProductDefinitionShapeId(text);
-            int nextId = FindMaxId(text) + 1;
-
-            var sb = new StringBuilder();
-            sb.AppendLine();
-            sb.AppendLine("/* ----- OpenMBD: PMI Annotations (ISO 10303-242) ----- */");
-
-            // A SHAPE_ASPECT entity that references the product shape and acts as
-            // the common anchor for every PMI entity below.
-            string pdsRef      = pdsId > 0 ? $"#{pdsId}" : "$";
-            int shapeAspectId  = nextId++;
-            sb.AppendLine(
-                $"#{shapeAspectId}=SHAPE_ASPECT(" +
-                $"'GD&T annotations','MBD',{pdsRef},.F.);");
-
-            // A NAMED_UNIT entity re-used by every MEASURE_WITH_UNIT below.
-            int unitId = nextId++;
-            sb.AppendLine($"#{unitId}=NAMED_UNIT(*);");
-
-            foreach (var item in items)
+            try
             {
-                if (item == null) continue;
-                nextId = AppendPmiEntity(sb, item, nextId, shapeAspectId, unitId);
+                // 2a. Read the SOLIDWORKS-exported geometry into the XCAF document.
+                int rc = OcctBridge.OcctReadStep(ctx, tempStepPath);
+                if (rc != 0)
+                    throw new InvalidOperationException(
+                        "OCCT failed to read the temporary STEP geometry file: " +
+                        OcctBridge.GetLastError(ctx));
+
+                // 2b. Attach PMI annotations to the XCAF document.
+                foreach (var item in items)
+                {
+                    if (item == null) continue;
+                    AddPmiAnnotation(ctx, item);
+                }
+
+                // 2c. Write the final STEP AP242 file.
+                rc = OcctBridge.OcctWriteStep242(ctx, outputPath);
+                if (rc != 0)
+                    throw new InvalidOperationException(
+                        "OCCT failed to write the STEP AP242 file: " +
+                        OcctBridge.GetLastError(ctx));
             }
-
-            sb.AppendLine("/* ----- end OpenMBD PMI ----- */");
-
-            // 2c. Insert the PMI block just before the last ENDSEC; (the one that
-            //     closes the DATA section, immediately before END-ISO-10303-21;).
-            int insertAt = FindDataEndsec(text);
-            text = insertAt >= 0
-                ? text.Insert(insertAt, sb.ToString())
-                : text + sb;
-
-            File.WriteAllText(outputPath, text, Encoding.ASCII);
+            finally
+            {
+                OcctBridge.OcctDestroyContext(ctx);
+            }
         }
 
         // ------------------------------------------------------------------ //
-        //  PMI entity builders                                                 //
+        //  PMI annotation dispatch                                             //
         // ------------------------------------------------------------------ //
 
-        private static int AppendPmiEntity(
-            StringBuilder sb, MBDDataModel item,
-            int nextId, int shapeAspectId, int unitId)
+        private static void AddPmiAnnotation(IntPtr ctx, MBDDataModel item)
         {
             switch (item.AnnotationType)
             {
-                case "Gtol":     return AppendGtol(sb, item, nextId, shapeAspectId, unitId);
-                case "DatumTag": return AppendDatum(sb, item, nextId, shapeAspectId);
-                case "Dimension":return AppendDimension(sb, item, nextId, shapeAspectId, unitId);
-                default:         return nextId;
+                case "Gtol":
+                    AddGtol(ctx, item);
+                    break;
+                case "DatumTag":
+                    AddDatumTag(ctx, item);
+                    break;
+                case "Dimension":
+                    AddDimension(ctx, item);
+                    break;
+                // Unknown annotation types are silently skipped.
             }
         }
 
-        private static int AppendGtol(
-            StringBuilder sb, MBDDataModel item,
-            int nextId, int shapeAspectId, int unitId)
+        private static void AddGtol(IntPtr ctx, MBDDataModel item)
         {
-            string typeName = GetToleranceEntityName(item.CharacteristicName);
-            string name     = Esc(item.CharacteristicName);
-            string desc     = Esc(item.RawCalloutText);
+            string toleranceType = MapToOcctToleranceType(item.CharacteristicName);
+            string datumRefs     = BuildDatumRefString(item.DatumReferences);
 
-            // Tolerance magnitude.
-            int measureId = nextId++;
-            sb.AppendLine(
-                $"#{measureId}=MEASURE_WITH_UNIT(" +
-                $"LENGTH_MEASURE({F(item.Value)}),#{unitId});");
+            int rc = OcctBridge.OcctAddGeomTolerance(
+                ctx,
+                toleranceType,
+                item.Value,
+                item.Unit ?? "mm",
+                item.RawCalloutText ?? string.Empty,
+                datumRefs);
 
-            // Geometric tolerance entity referencing the shape aspect.
-            int tolId = nextId++;
-            sb.AppendLine(
-                $"#{tolId}={typeName}('{name}','{desc}',#{measureId},#{shapeAspectId});");
-
-            // Datum references (primary, secondary, tertiary).
-            for (int i = 0; i < (item.DatumReferences?.Count ?? 0); i++)
-            {
-                var dr   = item.DatumReferences[i];
-                int drId = nextId++;
-                sb.AppendLine(
-                    $"#{drId}=DATUM_REFERENCE({i + 1}," +
-                    $"'{Esc(dr.Label)}','{Esc(dr.MaterialCondition)}');");
-            }
-
-            return nextId;
+            if (rc != 0)
+                throw new InvalidOperationException(
+                    $"OCCT OcctAddGeomTolerance failed (rc={rc}): " +
+                    OcctBridge.GetLastError(ctx));
         }
 
-        private static int AppendDatum(
-            StringBuilder sb, MBDDataModel item, int nextId, int shapeAspectId)
+        private static void AddDatumTag(IntPtr ctx, MBDDataModel item)
         {
-            string label = Esc(item.CharacteristicName ?? item.RawCalloutText);
+            string label = item.CharacteristicName ?? item.RawCalloutText ?? string.Empty;
 
-            int dfId = nextId++;
-            sb.AppendLine($"#{dfId}=DATUM_FEATURE(#{shapeAspectId},.T.);");
-
-            int dlId = nextId++;
-            sb.AppendLine(
-                $"#{dlId}=APPLIED_DATUM_FEATURE_DEFINITION('{label}',#{dfId});");
-
-            return nextId;
+            int rc = OcctBridge.OcctAddDatumTag(ctx, label);
+            if (rc != 0)
+                throw new InvalidOperationException(
+                    $"OCCT OcctAddDatumTag failed (rc={rc}): " +
+                    OcctBridge.GetLastError(ctx));
         }
 
-        private static int AppendDimension(
-            StringBuilder sb, MBDDataModel item,
-            int nextId, int shapeAspectId, int unitId)
+        private static void AddDimension(IntPtr ctx, MBDDataModel item)
         {
-            string name = Esc(item.CharacteristicName ?? "DIMENSION");
+            string name = item.CharacteristicName ?? "DIMENSION";
 
-            int measureId = nextId++;
-            sb.AppendLine(
-                $"#{measureId}=MEASURE_WITH_UNIT(" +
-                $"LENGTH_MEASURE({F(item.Value)}),#{unitId});");
+            int rc = OcctBridge.OcctAddDimension(
+                ctx,
+                name,
+                item.Value,
+                item.TolerancePlus,
+                item.ToleranceMinus,
+                item.Unit ?? "mm");
 
-            int dimId = nextId++;
-            sb.AppendLine(
-                $"#{dimId}=DIMENSIONAL_SIZE(#{shapeAspectId},'{name}',#{measureId});");
-
-            // Append plus/minus tolerance if present.
-            if (item.TolerancePlus != 0 || item.ToleranceMinus != 0)
-            {
-                int plusId = nextId++;
-                sb.AppendLine(
-                    $"#{plusId}=MEASURE_WITH_UNIT(" +
-                    $"LENGTH_MEASURE({F(item.TolerancePlus)}),#{unitId});");
-
-                int minusId = nextId++;
-                sb.AppendLine(
-                    $"#{minusId}=MEASURE_WITH_UNIT(" +
-                    $"LENGTH_MEASURE({F(item.ToleranceMinus)}),#{unitId});");
-
-                int tolId = nextId++;
-                sb.AppendLine(
-                    $"#{tolId}=PLUS_MINUS_TOLERANCE(#{plusId},#{minusId},#{dimId});");
-            }
-
-            return nextId;
-        }
-
-        // ------------------------------------------------------------------ //
-        //  STEP file parsing helpers                                           //
-        // ------------------------------------------------------------------ //
-
-        /// <summary>
-        /// Locates the first PRODUCT_DEFINITION_SHAPE entity in the STEP text and
-        /// returns its numeric entity ID, or 0 when not found.
-        /// </summary>
-        private static int FindProductDefinitionShapeId(string text)
-        {
-            var m = Regex.Match(
-                text,
-                @"#(\d+)\s*=\s*PRODUCT_DEFINITION_SHAPE\s*\(",
-                RegexOptions.IgnoreCase);
-
-            return m.Success && int.TryParse(m.Groups[1].Value, out int id) ? id : 0;
-        }
-
-        /// <summary>
-        /// Returns the highest entity ID number present in the STEP text,
-        /// defaulting to 1000 so that injected IDs do not collide with any
-        /// existing entity.
-        /// </summary>
-        private static int FindMaxId(string text)
-        {
-            int max = MinStartEntityId;
-            foreach (Match m in Regex.Matches(text, @"^#(\d+)\s*=", RegexOptions.Multiline))
-            {
-                if (int.TryParse(m.Groups[1].Value, out int id) && id > max)
-                    max = id;
-            }
-            return max;
-        }
-
-        /// <summary>
-        /// Returns the character position of the last <c>ENDSEC;</c> that closes
-        /// the DATA section (the one directly before <c>END-ISO-10303-21;</c>).
-        /// Returns -1 when the marker cannot be located.
-        /// </summary>
-        private static int FindDataEndsec(string text)
-        {
-            int endIso = text.LastIndexOf("END-ISO-10303-21;",
-                StringComparison.OrdinalIgnoreCase);
-            if (endIso < 0) return -1;
-
-            int endsec = text.LastIndexOf("ENDSEC;", endIso,
-                StringComparison.OrdinalIgnoreCase);
-            return endsec >= 0 ? endsec : -1;
+            if (rc != 0)
+                throw new InvalidOperationException(
+                    $"OCCT OcctAddDimension failed (rc={rc}): " +
+                    OcctBridge.GetLastError(ctx));
         }
 
         // ------------------------------------------------------------------ //
@@ -308,49 +207,75 @@ namespace OpenMBD
         // ------------------------------------------------------------------ //
 
         /// <summary>
-        /// Maps a SOLIDWORKS characteristic name string to the corresponding
-        /// ISO 10303-47 geometric tolerance entity name.
+        /// Maps a SOLIDWORKS characteristic name string to the tolerance type
+        /// key expected by <c>OcctAddGeomTolerance</c> (and parsed by
+        /// <c>OcctBridge.cpp → ParseToleranceType()</c>).
         /// </summary>
-        private static string GetToleranceEntityName(string name)
+        private static string MapToOcctToleranceType(string name)
         {
             if (string.IsNullOrWhiteSpace(name))
-                return "GEOMETRIC_TOLERANCE";
+                return string.Empty;
 
             switch (name.Trim().ToUpperInvariant())
             {
-                case "STRAIGHTNESS":          return "STRAIGHTNESS_TOLERANCE";
-                case "FLATNESS":              return "FLATNESS_TOLERANCE";
+                case "STRAIGHTNESS":         return "STRAIGHTNESS";
+                case "FLATNESS":             return "FLATNESS";
                 case "CIRCULARITY":
-                case "ROUNDNESS":             return "CIRCULARITY_TOLERANCE";
-                case "CYLINDRICITY":          return "CYLINDRICITY_TOLERANCE";
+                case "ROUNDNESS":            return "CIRCULARITY";
+                case "CYLINDRICITY":         return "CYLINDRICITY";
                 case "LINE_PROFILE":
-                case "PROFILE_OF_A_LINE":     return "LINE_PROFILE_TOLERANCE";
+                case "PROFILE_OF_A_LINE":    return "LINE_PROFILE";
                 case "SURFACE_PROFILE":
-                case "PROFILE_OF_A_SURFACE":  return "SURFACE_PROFILE_TOLERANCE";
-                case "ANGULARITY":            return "ANGULARITY_TOLERANCE";
+                case "PROFILE_OF_A_SURFACE": return "SURFACE_PROFILE";
+                case "ANGULARITY":           return "ANGULARITY";
                 case "PERPENDICULARITY":
-                case "SQUARENESS":            return "PERPENDICULARITY_TOLERANCE";
-                case "PARALLELISM":           return "PARALLELISM_TOLERANCE";
-                case "POSITION":              return "POSITION_TOLERANCE";
-                case "CONCENTRICITY":         return "CONCENTRICITY_TOLERANCE";
-                case "SYMMETRY":              return "SYMMETRY_TOLERANCE";
+                case "SQUARENESS":           return "PERPENDICULARITY";
+                case "PARALLELISM":          return "PARALLELISM";
+                case "POSITION":             return "POSITION";
+                case "CONCENTRICITY":        return "CONCENTRICITY";
+                case "SYMMETRY":             return "SYMMETRY";
                 case "CIRCULAR_RUNOUT":
-                case "RUNOUT":                return "CIRCULAR_RUNOUT_TOLERANCE";
-                case "TOTAL_RUNOUT":          return "TOTAL_RUNOUT_TOLERANCE";
-                default:                      return "GEOMETRIC_TOLERANCE";
+                case "RUNOUT":               return "CIRCULAR_RUNOUT";
+                case "TOTAL_RUNOUT":         return "TOTAL_RUNOUT";
+                default:                     return name.Trim().ToUpperInvariant();
             }
         }
 
         // ------------------------------------------------------------------ //
-        //  String / number helpers                                             //
+        //  Datum-reference encoding                                            //
         // ------------------------------------------------------------------ //
 
-        /// <summary>Formats a double for STEP ASCII output (full precision).</summary>
-        private static string F(double v) =>
-            v.ToString("G17", CultureInfo.InvariantCulture);
+        /// <summary>
+        /// Encodes a list of datum references as the pipe-separated string
+        /// expected by <c>OcctAddGeomTolerance</c>:
+        /// <c>"LABEL:MATERIAL_CONDITION|LABEL:MATERIAL_CONDITION|..."</c>.
+        /// <para>
+        /// The <c>|</c> and <c>:</c> characters are the delimiters used by the
+        /// C bridge parser (<c>ParseDatumRefs</c> in <c>OcctBridge.cpp</c>).
+        /// Any <c>|</c> or <c>:</c> that appear literally inside a label or
+        /// material-condition string are replaced with <c>_</c> to keep the
+        /// encoding unambiguous.  In practice, SOLIDWORKS datum labels are
+        /// single uppercase letters (A–Z) and material-condition strings are
+        /// short keywords ("RFS", "MMC", "LMC"), so this substitution has no
+        /// effect on real-world data.
+        /// </para>
+        /// </summary>
+        private static string BuildDatumRefString(List<DatumReference> refs)
+        {
+            if (refs == null || refs.Count == 0)
+                return string.Empty;
 
-        /// <summary>Escapes a string for use inside STEP single-quoted strings.</summary>
-        private static string Esc(string s) =>
-            (s ?? string.Empty).Replace("'", "''").Replace("\\", "\\\\");
+            var sb = new StringBuilder();
+            for (int i = 0; i < refs.Count; i++)
+            {
+                if (i > 0) sb.Append('|');
+                string label = refs[i].Label ?? string.Empty;
+                string mc    = refs[i].MaterialCondition ?? string.Empty;
+                sb.Append(label.Replace('|', '_').Replace(':', '_'));
+                sb.Append(':');
+                sb.Append(mc.Replace('|', '_').Replace(':', '_'));
+            }
+            return sb.ToString();
+        }
     }
 }
